@@ -1,0 +1,18 @@
+#ifndef DNS_PROXY_ERROR_H
+#define DNS_PROXY_ERROR_H
+
+typedef enum {
+  DNS_PROXY_OK,
+  DNS_PROXY_ERR_CONFIG_FILE,
+  DNS_PROXY_ERR_CONFIG_PARSE,
+  DNS_PROXY_ERR_MISSING_FIELD,
+  DNS_PROXY_ERR_INVALID_IP,
+  DNS_PROXY_ERR_SOCKET,
+  DNS_PROXY_ERR_BIND,
+  DNS_PROXY_ERR_MEMORY,
+  DNS_PROXY_ERR_UNKNOWN
+} dns_proxy_error_t;
+
+const char *dns_proxy_strerror(dns_proxy_error_t err);
+
+#endif

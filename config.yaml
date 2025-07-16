@@ -1,0 +1,7 @@
+---
+upstream_dns: 1.1.1.1
+blacklist_response: not_found
+blacklist:
+  - ads.com
+  - youtube.com
+
