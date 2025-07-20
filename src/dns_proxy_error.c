@@ -1,4 +1,4 @@
-#include <dns_error.h>
+#include <dns_proxy_error.h>
 
 const char *dns_proxy_strerror(dns_proxy_error_t err) {
   switch (err) {

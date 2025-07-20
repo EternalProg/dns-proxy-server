@@ -1,6 +1,7 @@
 ---
 upstream_dns: 1.1.1.1
-blacklist_response: not_found
+blacklist_response: resolve
+resolve_ip: 96.7.128.175
 blacklist:
   - ads.com
   - youtube.com
