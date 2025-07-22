@@ -5,6 +5,8 @@
 #include <uthash/uthash.h>
 
 #define MAX_DNS_ADDRESS_LENGTH 256
+#define DNS_UPSTREAM_PORT 53
+
 typedef struct {
   char dns_address[MAX_DNS_ADDRESS_LENGTH];
   UT_hash_handle hh;

@@ -37,10 +37,8 @@ void dns_proxy_parse_packet(dns_packet_t *packet,
 
   // Parse QNAME
   int offset = sizeof(dns_proxy_header_t);
-  char domain[DOMAIN_NAME_SIZE];
-  offset = dns_proxy_parse_qname(packet, offset, domain);
-  strncpy(request->question.qname, domain, DOMAIN_NAME_SIZE - 1);
-  request->question.qname[DOMAIN_NAME_SIZE - 1] = '\0';
+  offset = dns_proxy_parse_qname(packet, offset, request->question.qname);
+  request->question.qname[offset - 1] = '\0';
 
   // Parse QTYPE and QCLASS
   memcpy(&request->question.qtype, packet + offset, sizeof(uint16_t));
