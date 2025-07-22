@@ -1,24 +1,17 @@
 #include <dns_proxy_error.h>
 
+static const char *DNS_PROXY_ERROR_MESSAGES[] = {
+    "No error",           "Failed to open config file",
+    "YAML parse error",   "Missing required config field",
+    "Invalid IP address", "Socket creation failed",
+    "Socket bind failed", "Socket listen failed",
+    "Connection failed",  "Memory allocation failed",
+    "Epoll error",        "Unknown error"};
+
 const char *dns_proxy_strerror(dns_proxy_error_t err) {
-  switch (err) {
-    case DNS_PROXY_OK:
-      return "No error";
-    case DNS_PROXY_ERR_CONFIG_FILE:
-      return "Failed to open config file";
-    case DNS_PROXY_ERR_CONFIG_PARSE:
-      return "YAML parse error";
-    case DNS_PROXY_ERR_MISSING_FIELD:
-      return "Missing required config field";
-    case DNS_PROXY_ERR_INVALID_IP:
-      return "Invalid IP address";
-    case DNS_PROXY_ERR_SOCKET:
-      return "Socket creation failed";
-    case DNS_PROXY_ERR_BIND:
-      return "Socket bind failed";
-    case DNS_PROXY_ERR_MEMORY:
-      return "Memory allocation failed";
-    default:
-      return "Unknown error";
+  if (err < 0 || err >= sizeof(DNS_PROXY_ERROR_MESSAGES) /
+                            sizeof(*DNS_PROXY_ERROR_MESSAGES)) {
+    return "Invalid error code";
   }
+  return DNS_PROXY_ERROR_MESSAGES[err];
 }
