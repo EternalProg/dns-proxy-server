@@ -4,6 +4,7 @@
 #include <dns_proxy_request.h>
 #include <dns_proxy_server.h>
 #include <dns_proxy_utils.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <stdbool.h>
@@ -14,6 +15,33 @@
 #include <sys/types.h>
 #include <thpool.h>
 #include <unistd.h>
+
+typedef struct {
+  dns_proxy_server_t *server;
+  struct sockaddr_in client_addr;
+  socklen_t addr_len;
+  dns_packet_t packet[BUFFER_SIZE];
+  ssize_t packet_size;
+} dns_proxy_task_t;
+
+static int dns_encode_qname(uint8_t *buffer, const char *domain) {
+  int offset = 0;
+  const char *label = domain;
+
+  while (*label) {
+    const char *dot = strchr(label, '.');
+    size_t len = dot ? (size_t)(dot - label) : strlen(label);
+    buffer[offset++] = (uint8_t)len;
+    memcpy(buffer + offset, label, len);
+    offset += len;
+    if (!dot)
+      break;
+    label = dot + 1;
+  }
+
+  buffer[offset++] = 0x00; // end of QNAME
+  return offset;
+}
 
 static dns_proxy_error_t
 dns_proxy_create_listen_socket(int port, dns_proxy_server_t *server) {
@@ -31,7 +59,7 @@ dns_proxy_create_listen_socket(int port, dns_proxy_server_t *server) {
     return DNS_PROXY_ERR_BIND;
   }
 
- // dns_proxy_set_non_blocking(listen_fd);
+  dns_proxy_set_non_blocking(listen_fd);
   server->listen_fd = listen_fd;
   return DNS_PROXY_OK;
 }
@@ -45,7 +73,7 @@ dns_proxy_configure_upstream(dns_proxy_server_t *server) {
 
   struct sockaddr_in addr = {
       .sin_family = AF_INET,
-      .sin_port = htons(53),
+      .sin_port = htons(DNS_UPSTREAM_PORT),
   };
 
   if (inet_pton(AF_INET, server->config->upstream_dns, &addr.sin_addr) <= 0) {
@@ -53,25 +81,21 @@ dns_proxy_configure_upstream(dns_proxy_server_t *server) {
     return DNS_PROXY_ERR_INVALID_IP;
   }
 
-  if (connect(upstream_dns_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-    close(upstream_dns_fd);
-    return DNS_PROXY_ERR_CONNECTION;
-  }
-
-  //dns_proxy_set_non_blocking(upstream_dns_fd);
-  server->upstream_dns_fd = upstream_dns_fd;
-
   return DNS_PROXY_OK;
 }
 
 static dns_proxy_error_t
 dns_proxy_server_configure_epoll(dns_proxy_server_t *server) {
   server->epoll_fd = epoll_create1(0);
+  if (server->epoll_fd < 0) {
+    LOG_ERROR("Failed to create epoll instance");
+    return DNS_PROXY_ERR_EPOLL;
+  }
   server->ev.events = EPOLLIN;
   server->ev.data.fd = server->listen_fd;
   if (epoll_ctl(server->epoll_fd, EPOLL_CTL_ADD, server->listen_fd,
                 &server->ev) < 0) {
-    perror("Failed to add listen socket to epoll");
+    LOG_ERROR("Failed to add listen socket to epoll");
     return DNS_PROXY_ERR_EPOLL;
   }
   return DNS_PROXY_OK;
@@ -93,7 +117,7 @@ dns_proxy_send_response(dns_proxy_server_t *server,
                         struct sockaddr_in *client_addr) {
   dns_proxy_blacklist_response_t response_type =
       server->config->blacklist_response;
-  fprintf(stderr, "Blocked request for domain: %s\n", request->question.qname);
+  LOG_DEBUG("Blocked request for domain: %s\n", request->question.qname);
 
   dns_packet_t response_packet[BUFFER_SIZE];
   int offset = 0;
@@ -125,7 +149,7 @@ dns_proxy_send_response(dns_proxy_server_t *server,
     break;
 
   default:
-    fprintf(stderr, "Unknown blacklist response type: %d\n", response_type);
+    LOG_ERROR("Unknown blacklist response type: %d\n", response_type);
     return DNS_PROXY_ERR_UNKNOWN;
   }
 
@@ -135,19 +159,7 @@ dns_proxy_send_response(dns_proxy_server_t *server,
   offset += sizeof(dns_proxy_header_t);
 
   // Encode QNAME
-  const char *qname = request->question.qname;
-  const char *label = qname;
-  while (*label) {
-    const char *dot = strchr(label, '.');
-    size_t len = dot ? (size_t)(dot - label) : strlen(label);
-    response_packet[offset++] = (uint8_t)len;
-    memcpy(response_packet + offset, label, len);
-    offset += len;
-    if (!dot)
-      break;
-    label = dot + 1;
-  }
-  response_packet[offset++] = 0x00;
+  offset += dns_encode_qname(response_packet + offset, request->question.qname);
 
   // Add QTYPE and QCLASS
   uint16_t qtype = htons(request->question.qtype);
@@ -186,7 +198,7 @@ dns_proxy_send_response(dns_proxy_server_t *server,
     // RDATA: IP address
     struct in_addr addr;
     if (inet_pton(AF_INET, server->config->resolve_ip, &addr) != 1) {
-      fprintf(stderr, "Invalid resolve IP\n");
+      LOG_ERROR("Invalid resolve IP\n");
       return DNS_PROXY_ERR_INVALID_IP;
     }
 
@@ -198,73 +210,84 @@ dns_proxy_send_response(dns_proxy_server_t *server,
   ssize_t sent = sendto(server->listen_fd, response_packet, offset, 0,
                         (struct sockaddr *)client_addr, sizeof(*client_addr));
   if (sent < 0) {
-    perror("Failed to send blacklist response");
+    LOG_ERROR("Failed to send blacklist response");
     return DNS_PROXY_ERR_CONNECTION;
   }
 
   return DNS_PROXY_OK;
 }
+static int
+dns_proxy_create_upstream_socket_with_timeout(const char *ip,
+                                              struct sockaddr_in *addr) {
+  int fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (fd < 0)
+    return -1;
 
-static void process_dns_request(dns_proxy_server_t *server) {
-  struct sockaddr_in client_addr;
-  socklen_t addr_len = sizeof(client_addr);
-  dns_packet_t packet[BUFFER_SIZE];
-  size_t packet_size = recvfrom(server->listen_fd, packet, BUFFER_SIZE, 0,
-                                (struct sockaddr *)&client_addr, &addr_len);
+  struct timeval timeout = {.tv_sec = 2, .tv_usec = 0};
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
-  if (packet_size == 0) {
-    return;
+  addr->sin_family = AF_INET;
+  addr->sin_port = htons(53);
+
+  if (inet_pton(AF_INET, ip, &addr->sin_addr) != 1) {
+    close(fd);
+    return -1;
   }
 
-  if (packet_size < 0) {
-    perror("Failed to receive data");
-    return;
-  }
+  return fd;
+}
+static void dns_proxy_worker_thread(void *arg) {
+  dns_proxy_task_t *task = (dns_proxy_task_t *)arg;
 
   dns_proxy_request_t request;
-  dns_proxy_parse_packet(packet, &request);
-  printf("Received request for domain: %s\n", request.question.qname);
+  dns_proxy_parse_packet(task->packet, &request);
+  LOG_DEBUG("Received request for domain: %s", request.question.qname);
 
-  // Process the request
-  // 1. Chech if dns address isn't in blacklist
-  // 2. Forward the request to upstream DNS server
-  // 3. Receive the response from upstream DNS server
-  // 4. Send the response back to the client
-  if (dns_proxy_check_blacklist(server->config, &request)) {
-    /*
-  If a domain name from a client's request is found in the blacklist, then
-the proxy server responds with a response defined in the configuration file.
-*/
-    if (dns_proxy_send_response(server, &request, &client_addr) !=
-        DNS_PROXY_OK) {
-      fprintf(stderr, "Failed to send blacklist response\n");
-    }
+  if (dns_proxy_check_blacklist(task->server->config, &request)) {
+    dns_proxy_send_response(task->server, &request, &task->client_addr);
+    free(task);
     return;
   }
 
-  // Forward request to upstream DNS server
-  printf("Sending %zd bytes to upstream\n", packet_size);
-  ssize_t sent_bytes = send(server->upstream_dns_fd, packet, packet_size, 0);
-  if (sent_bytes < 0) {
-    perror("Failed to send request to upstream DNS server");
+  struct sockaddr_in upstream_addr;
+  int upstream_fd = dns_proxy_create_upstream_socket_with_timeout(
+      task->server->config->upstream_dns, &upstream_addr);
+
+  if (upstream_fd < 0) {
+    LOG_ERROR("Failed to create upstream socket");
+    free(task);
     return;
   }
 
-  // Receive response from upstream DNS server
-  ssize_t received_bytes =
-      recv(server->upstream_dns_fd, packet, BUFFER_SIZE, 0);
-  if (received_bytes < 0) {
-    perror("Failed to receive response from upstream DNS server");
+  ssize_t sent =
+      sendto(upstream_fd, task->packet, task->packet_size, 0,
+             (struct sockaddr *)&upstream_addr, sizeof(upstream_addr));
+  if (sent < 0) {
+    LOG_ERROR("sendto upstream failed: %s", strerror(errno));
+    close(upstream_fd);
+    free(task);
     return;
   }
 
-  // Send response back to client
-  ssize_t sent_response = sendto(server->listen_fd, packet, received_bytes, 0,
-                                 (struct sockaddr *)&client_addr, addr_len);
-  if (sent_response < 0) {
-    perror("Failed to send response to client");
+  dns_packet_t response[BUFFER_SIZE];
+  ssize_t recvd = recvfrom(upstream_fd, response, BUFFER_SIZE, 0, NULL, NULL);
+  if (recvd < 0) {
+    LOG_ERROR("recvfrom upstream failed: %s", strerror(errno));
+    close(upstream_fd);
+    free(task);
     return;
   }
+
+  close(upstream_fd);
+
+  ssize_t client_sent =
+      sendto(task->server->listen_fd, response, recvd, 0,
+             (struct sockaddr *)&task->client_addr, task->addr_len);
+  if (client_sent < 0) {
+    LOG_ERROR("sendto client failed: %s", strerror(errno));
+  }
+
+  free(task);
 }
 
 dns_proxy_error_t dns_proxy_server_init(int port, int thread_count,
@@ -283,35 +306,64 @@ dns_proxy_error_t dns_proxy_server_init(int port, int thread_count,
   server->thpool = thpool_init(thread_count);
   status = dns_proxy_configure_upstream(server);
   if (status != DNS_PROXY_OK) {
-    return status;
+    LOG_ERROR("Failed to configure upstream DNS server: %s",
+              dns_proxy_strerror(status));
+    goto cleanup;
   }
 
-  dns_proxy_server_configure_epoll(server);
+  status = dns_proxy_server_configure_epoll(server);
+  if (status != DNS_PROXY_OK) {
+    LOG_ERROR("Failed to configure epoll: %s", dns_proxy_strerror(status));
+    goto cleanup;
+  }
 
+  return status;
+
+cleanup:
+  thpool_destroy(server->thpool);
   return status;
 }
 
 void dns_proxy_server_delete(dns_proxy_server_t *server) {
   close(server->listen_fd);
-  close(server->upstream_dns_fd);
   close(server->epoll_fd);
   dns_proxy_config_delete(server->config);
   free(server->config);
   thpool_destroy(server->thpool);
 }
 
-dns_proxy_error_t dns_proxy_server_run(dns_proxy_server_t *server) {
+void dns_proxy_server_run(dns_proxy_server_t *server) {
   for (;;) {
     size_t event_count =
-        epoll_wait(server->epoll_fd, server->events, MAX_EVENTS, 0);
+        epoll_wait(server->epoll_fd, server->events, MAX_EVENTS, -1);
 
     for (size_t i = 0; i < event_count; ++i) {
       int fd = server->events[i].data.fd;
       if (fd == server->listen_fd) {
-        thpool_add_work(server->thpool, (void *)process_dns_request,
-                        (void *)server);
+        struct sockaddr_in client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+        dns_packet_t packet[BUFFER_SIZE];
+        ssize_t packet_size =
+            recvfrom(server->listen_fd, packet, BUFFER_SIZE, 0,
+                     (struct sockaddr *)&client_addr, &addr_len);
+
+        if (packet_size < 0) {
+          if (errno == EAGAIN || errno == EWOULDBLOCK)
+            continue;
+          LOG_ERROR("recvfrom failed: %s", strerror(errno));
+          continue;
+        }
+
+        dns_proxy_task_t *task = malloc(sizeof(dns_proxy_task_t));
+        memcpy(&task->client_addr, &client_addr, sizeof(client_addr));
+        task->addr_len = addr_len;
+        task->packet_size = packet_size;
+        memcpy(task->packet, packet, packet_size);
+        task->server = server;
+
+        thpool_add_work(server->thpool, (void *)dns_proxy_worker_thread,
+                        (void *)task);
       }
     }
   }
-  return DNS_PROXY_OK;
 }
