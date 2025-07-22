@@ -54,3 +54,7 @@ target_link_libraries(${PROJECT_NAME}
   ${CYAML_STATIC_LIB}
   yaml
 )
+
+option(LOG_LEVEL "Log level (0=DEBUG, 1=INFO, 2=WARN, 3=ERROR, 4=NONE)" 0)
+
+add_compile_definitions(LOG_LEVEL=${LOG_LEVEL})

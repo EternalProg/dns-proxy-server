@@ -7,9 +7,8 @@
 #include <sys/socket.h>
 
 #define BUFFER_SIZE 512
-#define DOMAIN_NAME_SIZE 64
-#define THREAD_POOL_SIZE 4
-#define JOB_QUEUE_CAPACITY 128
+#define MAX_DOMAIN_NAME_SIZE 64
+#define JOB_QUEUE_CAPACITY 256
 
 typedef int file_descriptor_t;
 typedef uint8_t dns_packet_t;
@@ -26,7 +25,7 @@ typedef struct {
 } dns_proxy_header_t;
 
 typedef struct {
-  char qname[DOMAIN_NAME_SIZE];
+  char qname[MAX_DOMAIN_NAME_SIZE];
   uint16_t qtype;
   uint16_t qclass;
 } dns_proxy_question_t;
